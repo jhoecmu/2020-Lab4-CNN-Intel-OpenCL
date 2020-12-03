@@ -1,0 +1,229 @@
+/****************************************************************
+ * Copyright (c) 2020~2020, 18-643 Course Staff, CMU
+ * All rights reserved.
+
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+
+ * 2. Redistributions in binary form must reproduce the above
+ *    copyright notice, this list of conditions and the following
+ *    disclaimer in the documentation and/or other materials provided
+ *    with the distribution.
+
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+ * OF THE POSSIBILITY OF SUCH DAMAGE.
+
+ * The views and conclusions contained in the software and
+ * documentation are those of the authors and should not be
+ * interpreted as representing official policies, either expressed or
+ * implied, of the FreeBSD Project.
+ ****************************************************************/
+
+/****************************************************************
+ * Blocked (without copying) convolution layer implementation 
+ * based on Figure 5:
+ *    C. Zhang, et al., "Optimizing FPGA-based Accelerator 
+ *    Design for Deep Convolutional Neural Networks," FPGA, 2015.
+ ****************************************************************/
+
+#include "../host/inc/util643.h"
+#include "../host/inc/instance643.h"
+#include "../host/inc/kernel643.h"
+
+__attribute((reqd_work_group_size(1, 1, 1)))
+__kernel void cnn(__global const cnndata_t* restrict input, __global const cnndata_t* restrict weights, __global cnndata_t* restrict output, 
+                  const uint64_t batch_size,  const kernel_size kernel_params, const layer_size layer_params)
+{
+  index_t iter;
+  index_t row, col, to, ti;
+
+#if FIX_K
+#define _K_wts K_WTS
+#else
+#define _K_wts ((index_t)kernel_params.K_wts)
+#endif
+
+#if FIX_S
+#define _S_wts S_WTS
+#else
+#define _S_wts ((index_t)kernel_params.S_wts)
+#endif
+
+  index_t _R_ofm = FIX_R ? R_OFM : layer_params.R_ofm;
+  index_t _C_ofm = FIX_C ? C_OFM : layer_params.C_ofm;
+  index_t _M_ofm = FIX_M ? M_OFM : layer_params.M_ofm;
+
+  index_t _R_ifm = (_R_ofm * _S_wts + _K_wts - _S_wts);
+  index_t _C_ifm = (_C_ofm * _S_wts + _K_wts - _S_wts);
+  index_t _N_ifm = FIX_N ? N_IFM : layer_params.N_ifm;
+
+#if FIX_TR
+#define _Tr TR
+#else
+#define _TR ((index_t)kernel_params.Tr)
+#endif
+
+#if FIX_TC
+#define _Tc TC
+#else
+#define _TC ((index_t)kernel_params.Tc)
+#endif
+
+#if FIX_TM
+#define _Tm TM
+#else
+#define _TM ((index_t)kernel_params.Tm)
+#endif
+
+#if FIX_TN
+#define _Tn TN
+#else
+#define _TN ((index_t)kernel_params.Tn)
+#endif
+
+  local cnndata_t BufI[_Tn][_Tr*_S_wts+_K_wts-1][_Tc*_S_wts+_K_wts-1];
+  local cnndata_t BufO[_Tm][_Tr][_Tc];
+  local cnndata_t BufW[_Tm][_Tn][_K_wts][_K_wts];
+
+  for(iter = 0; iter < batch_size; iter++) {
+    
+    for(row=0; row<_R_ofm; row+=_Tr) {
+      for(col=0; col<_C_ofm ; col+=_Tc) {
+	for(to=0; to<_M_ofm; to+=_Tm) {
+	  // temporary versions of incremented indices;
+	  // same usage as in ZhangIsfpga_2()
+	  index_t trr, tcc, too, tii;
+
+	  // only need to zero BufO in this loop ordering
+	  {
+	  // indices internal to the block: count from 0
+	    index_t ioo, icc, irr;
+          
+	    for(ioo=0;ioo<_Tm;ioo++) {
+	      for(irr=0;irr<_Tr;irr++) {
+		for(icc=0;icc<_Tc;icc++) {
+		  BufO[ioo][irr][icc]=0;
+		}
+	      }
+	    }
+	  }
+	  
+	  for(ti=0; ti<_N_ifm; ti+=_Tn) {
+	    {
+	      /*
+	       * load active input feature map into local buffer
+	       */
+	      
+	      // indices internal to the block: count from 0
+	      index_t irr, icc, iii;
+	      
+	      // incremented temporary indices for input row and col
+	      index_t  xrr, xcc;
+	      
+	      for(tii=ti,iii=0;tii<MIN(ti+_Tn,_N_ifm);tii++,iii++){
+		for(xrr=row*_S_wts,irr=0;xrr<(MIN(row+_Tr,_R_ofm)*_S_wts+_K_wts-1);xrr++,irr++){
+		  for(xcc=col*_S_wts,icc=0;xcc<(MIN(col+_Tc,_C_ofm)*_S_wts+_K_wts-1);xcc++,icc++){
+		    BufI[iii][irr][icc]=ARRAYi(input,iter,tii,xrr,xcc,0,_N_ifm,_R_ifm,_C_ifm);
+		  }
+		}
+	      }
+	    }
+	    
+	    {
+	      /*
+	       * load active weights into local buffer
+	       */
+	      
+	      // indices internal to the block: count from 0                                     
+	      index_t ioo, iii, irr, icc;
+	      
+	      for(too=to,ioo=0;too<MIN(to+_Tm,_M_ofm);too++,ioo++){
+		for(tii=ti,iii=0;tii<MIN(ti+_Tn,_N_ifm);tii++,iii++){
+		  for(irr=0;irr<_K_wts;irr++) {
+		    for(icc=0;icc<_K_wts;icc++) {
+		      BufW[ioo][iii][irr][icc]=ARRAYw(weights,too,tii,irr,icc,_M_ofm,_N_ifm,_K_wts,_K_wts);
+		    }
+		  }
+		}
+		
+		/* write 0s into over-run regions at the end;
+		 * this way convolve_kernel() accumulates correctly
+		 * without needing a special case */
+		if (iii<_Tn) {
+		  for(;iii<_Tn;iii++) {
+		    for(irr=0;irr<_K_wts;irr++) {
+		      for(icc=0;icc<_K_wts;icc++) {
+			BufW[ioo][iii][irr][icc]=0;
+		      }
+		    }
+		  }
+		}
+	      }
+	    }
+	    
+	    /*
+	     * This is the kernel to be implemented on the fabric using
+	     * HLS.
+	     *
+	     * Call as software for Linux and HLS simulation testbench
+	     */
+	     
+	    {	
+	      index_t to_b, ti_b, row_b, col_b;  
+	      
+	      for(row_b=0;row_b<_Tr;row_b++){
+		for(col_b=0;col_b<_Tc;col_b++){
+		  for(to_b=0;to_b<_Tm;to_b++){
+		    for(ti_b=0;ti_b<_Tn;ti_b++){
+		      index_t i, j;
+
+		      for(i=0;i<_K_wts;i++){
+			for(j=0;j<_K_wts;j++){
+			  BufO[to_b][row_b][col_b]+=
+			    BufW[to_b][ti_b][i][j]*
+			    BufI[ti_b][_S_wts*row_b+i][_S_wts*col_b+j];
+			}
+		      }
+		    }
+		  }
+		}
+	      }
+	    }
+	  }
+
+	  {
+	    /*
+	     * unload finished active intermedaite output feature map
+	     * from local to full buffer
+	     */
+	    
+	    // indices internal to the block: count from 0                                       
+	    unsigned long ioo, icc, irr;
+	    
+	    for(too=to,ioo=0;too<MIN(to+_Tm,_M_ofm);too++,ioo++){
+	      for(trr=row,irr=0;trr<MIN(row+_Tr,_R_ofm);trr++,irr++){
+		for(tcc=col,icc=0;tcc<MIN(col+_Tc,_C_ofm);tcc++,icc++){
+		  ARRAYo(output,iter,too,trr,tcc,0,_M_ofm,_R_ofm,_C_ofm)=BufO[ioo][irr][icc];
+		}
+	      }
+	    }
+	  }
+	}
+      }
+    }
+  }
+}
