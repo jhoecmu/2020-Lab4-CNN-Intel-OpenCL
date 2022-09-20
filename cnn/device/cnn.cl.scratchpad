@@ -95,7 +95,7 @@ __kernel void cnn(__global const cnndata_t* restrict input, __global const cnnda
 #define _TN ((index_t)kernel_params.Tn)
 #endif
 
-  local cnndata_t BufI[_Tn][_Tr*_S_wts+_K_wts-1][_Tc*_S_wts+_K_wts-1];
+  local cnndata_t BufI[_Tn][_Tr*_S_wts+_K_wts-_S_wts][_Tc*_S_wts+_K_wts-_S_wts];
   local cnndata_t BufO[_Tm][_Tr][_Tc];
   local cnndata_t BufW[_Tm][_Tn][_K_wts][_K_wts];
 
@@ -135,8 +135,8 @@ __kernel void cnn(__global const cnndata_t* restrict input, __global const cnnda
 	      index_t  xrr, xcc;
 	      
 	      for(tii=ti,iii=0;tii<MIN(ti+_Tn,_N_ifm);tii++,iii++){
-		for(xrr=row*_S_wts,irr=0;xrr<(MIN(row+_Tr,_R_ofm)*_S_wts+_K_wts-1);xrr++,irr++){
-		  for(xcc=col*_S_wts,icc=0;xcc<(MIN(col+_Tc,_C_ofm)*_S_wts+_K_wts-1);xcc++,icc++){
+		for(xrr=row*_S_wts,irr=0;xrr<(MIN(row+_Tr,_R_ofm)*_S_wts+_K_wts-_S_wts);xrr++,irr++){
+		  for(xcc=col*_S_wts,icc=0;xcc<(MIN(col+_Tc,_C_ofm)*_S_wts+_K_wts-_S_wts);xcc++,icc++){
 		    BufI[iii][irr][icc]=ARRAYi(input,iter,tii,xrr,xcc,0,_N_ifm,_R_ifm,_C_ifm);
 		  }
 		}
