@@ -890,6 +890,14 @@ void verify(cnndata_t *ref, cnndata_t *checkit) {
     printf("Results correct.\n\n");
 }
 
+/* 
+ * The below very neat implementation of float eqaul is taken from
+ * http://floating-point-gui.de/errors/comparison/
+ * 
+ * Published at floating-point-gui.de under the Creative Commons
+ * Attribution License (BY)
+ * http://creativecommons.org/licenses/by/3.0/
+ */ 
 int nearlyEqual(cnndata_t a, cnndata_t b) {
     cnndata_t absA = fabs(a);
     cnndata_t absB = fabs(b);
